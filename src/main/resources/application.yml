@@ -1,0 +1,28 @@
+server:
+  port: 8081
+
+spring:
+  datasource:
+    url: jdbc:h2:mem:outbox
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+  h2:
+    console:
+      enabled: true
+  kafka:
+    bootstrap-servers: localhost:19092
+    producer:
+      properties:
+        # Kafka가 내려가 있을 때 send()가 오래 붙잡혀 있지 않도록 짧게 설정
+        max.block.ms: 3000
+        request.timeout.ms: 3000
+        delivery.timeout.ms: 5000
+    consumer:
+      group-id: outbox-example
+      auto-offset-reset: earliest
+
+outbox:
+  relay:
+    scheduling-enabled: true
+    fixed-delay-ms: 1000
