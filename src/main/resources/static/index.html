@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outbox Pattern Lab</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #e2e5ea;
+    --text: #1d2330;
+    --muted: #6b7383;
+    --fail: #d64545;
+    --ok: #1f9d55;
+    --accent: #3b5bdb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c;
+      --panel: #1c2027;
+      --border: #2c323c;
+      --text: #e6e9ef;
+      --muted: #8d95a5;
+      --fail: #f07070;
+      --ok: #4cc283;
+      --accent: #7b93f0;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  }
+  main { max-width: 1280px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+  h1 { font-size: 20px; margin: 0; flex: 1; }
+  h2 { font-size: 15px; margin: 0 0 4px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  button {
+    font: inherit; cursor: pointer; border-radius: 6px; padding: 6px 14px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  .grid { display: grid; gap: 16px; margin-bottom: 16px; }
+  .cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  @media (max-width: 900px) { .cols-2, .cols-3 { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-width: 0; }
+
+  form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+  input[type=text] {
+    font: inherit; width: 120px; padding: 5px 8px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  }
+  .result { font-size: 13px; }
+  .result.ok { color: var(--ok); }
+  .result.fail { color: var(--fail); }
+
+  .table-wrap { max-height: 480px; overflow: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
+  .nowrap { white-space: nowrap; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
+  .empty { color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Outbox Pattern Lab</h1>
+    <span class="muted" id="updated"></span>
+    <button id="reset">초기화</button>
+  </header>
+
+  <section class="grid cols-2">
+    <div class="panel">
+      <h2>direct-publish: Kafka 직접 발행</h2>
+      <div class="muted">DB insert(즉시 커밋) → Kafka send</div>
+      <form data-url="/direct-publish/orders">
+        <input type="text" name="productName" value="모니터" required>
+        <label><input type="checkbox" name="failAfterInsert" checked> insert 이후 장애</label>
+        <button class="primary" type="submit">주문</button>
+        <span class="result"></span>
+      </form>
+    </div>
+    <div class="panel">
+      <h2>outbox: Outbox 테이블 + Relay 발행</h2>
+      <div class="muted">DB insert + Outbox insert(한 트랜잭션) → Relay가 Kafka send</div>
+      <form data-url="/outbox/orders">
+        <input type="text" name="productName" value="키보드" required>
+        <label><input type="checkbox" name="failAfterInsert"> insert 이후 장애</label>
+        <button class="primary" type="submit">주문</button>
+        <span class="result"></span>
+      </form>
+    </div>
+  </section>
+
+  <section class="grid cols-3">
+    <div class="panel">
+      <h2>DB: orders <span class="muted" id="orders-count"></span></h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>id</th><th>product_name</th><th>created_at</th></tr></thead>
+          <tbody id="orders"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>DB: outbox_event <span class="muted" id="outbox-count"></span></h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>id</th><th>aggregate_id</th><th>published_at</th></tr></thead>
+          <tbody id="outbox"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Kafka: 수신 record <span class="muted" id="records-count"></span></h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>topic</th><th>key</th><th>value</th></tr></thead>
+          <tbody id="records"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+  const time = (iso) => iso ? iso.substring(11, 19) : '-';
+
+  // 주문 요청
+  document.querySelectorAll('form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const result = form.querySelector('.result');
+      const res = await fetch(`${form.dataset.url}?failAfterInsert=${form.failAfterInsert.checked}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ productName: form.productName.value }),
+      });
+      result.className = res.ok ? 'result ok' : 'result fail';
+      result.textContent = `${res.status} ${res.ok ? '주문 저장' : await res.text()}`;
+      refresh();
+    });
+  });
+
+  $('reset').addEventListener('click', async () => {
+    await fetch('/data', { method: 'DELETE' });
+    document.querySelectorAll('.result').forEach((r) => r.textContent = '');
+    refresh();
+  });
+
+  // 3개 데이터 현황을 1초마다 다시 그린다
+  function renderTable(id, rows, columns, toCells) {
+    $(id).innerHTML = rows.length
+      ? [...rows].reverse().map((r) => `<tr>${toCells(r).map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')
+      : `<tr><td class="empty" colspan="${columns}">없음</td></tr>`;
+    $(`${id}-count`).textContent = `(${rows.length})`;
+  }
+
+  async function refresh() {
+    try {
+      const [orders, outbox, records] = await Promise.all(
+        ['/orders', '/outbox-events', '/received-events'].map((u) => fetch(u).then((r) => r.json())));
+      renderTable('orders', orders, 3, (o) => [o.id, esc(o.productName), time(o.createdAt)]);
+      renderTable('outbox', outbox, 3, (e) => [e.id, esc(e.aggregateId), time(e.publishedAt)]);
+      renderTable('records', records, 3, (r) => [`<span class="nowrap">${esc(r.topic)}</span>`, esc(r.orderId), `<span class="mono">${esc(r.payload)}</span>`]);
+      $('updated').textContent = `갱신 ${new Date().toTimeString().substring(0, 8)}`;
+    } catch (err) {
+      $('updated').textContent = '서버 연결 실패';
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 1000);
+</script>
+</body>
+</html>
